@@ -1,3 +1,15 @@
+//! Communicates with the Strava `OAuth2` API to authenticate and fetch data from an athlete
+#![allow(clippy::std_instead_of_alloc, reason = "This is using std library")]
+#![allow(clippy::implicit_return, reason = "Implicit returns are fine")]
+#![allow(clippy::absolute_paths, reason = "This is needed sometimes for clarity")]
+#![allow(clippy::missing_docs_in_private_items, reason = "The name of the struct should be enough documentation")]
+#![allow(clippy::question_mark_used, reason = "Question marks keep the code clean")]
+#![allow(clippy::single_call_fn, reason = "Single call functions are okay to organize code")]
+#![allow(clippy::expect_used, reason = "Some errors are not recoverable")]
+#![allow(clippy::wildcard_enum_match_arm, reason = "This is needed sometimes")]
+#![allow(clippy::shadow_reuse, reason = "Shadowing is useful sometimes")]
+#![allow(clippy::min_ident_chars, reason = "Single char variables are fine sometimes")]
+
 use anyhow::{Context, Result};
 use async_session::{MemoryStore, Session, SessionStore};
 use axum::{
@@ -17,11 +29,12 @@ use oauth2::{
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+
 use std::{env, sync::Arc};
-use tokio::{runtime::Handle, sync::Mutex};
+use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-static COOKIE_NAME: &str = "SESSION";
+static COOKIE_NAME: &str = "SESSION"; // Name of cookie storing the serialized user session
 
 #[tokio::main]
 async fn main() {
@@ -35,7 +48,7 @@ async fn main() {
 
     // `MemoryStore` is just used as an example. Don't use this in production.
     let store = MemoryStore::new();
-    let oauth_client = oauth_client().unwrap();
+    let oauth_client = oauth_client().expect("Could not create an OauthClient instance");
 
     let app_state = AppState::new(store, oauth_client);
 
@@ -49,37 +62,37 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .context("failed to bind TcpListener")
-        .unwrap();
+        .expect("Failed to bind TcpListener");
 
     tracing::debug!(
         "listening on {}",
         listener
             .local_addr()
             .context("failed to return local address")
-            .unwrap()
+            .expect("failed to return local address")
     );
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await.expect("Unable to start Axum server");
 }
 
 #[derive(Clone)]
 struct AppState {
+    store: MemoryStore,
+    oauth_client: BasicClient,
     inner: Arc<Mutex<AppStateInner>>,
 }
 struct AppStateInner {
-    store: MemoryStore,
-    oauth_client: BasicClient,
     csrf_state: Option<CsrfToken>,
 }
 
 impl AppState {
     fn new(store: MemoryStore, oauth_client: BasicClient) -> Self {
         Self {
+            store,
+            oauth_client,
             inner: Arc::new(
                 Mutex::new(
                     AppStateInner {
-                        store,
-                        oauth_client,
                         csrf_state: None,
                     }
                 )
@@ -87,39 +100,16 @@ impl AppState {
         }
     }
 
-    // fn get_store(&self) -> MemoryStore {
-    //     // Try to get the store from the cache, or initialize it if not already set
-    //     self.store_cache
-    //         .get_or_init(|| {
-    //             // Access `clone_store` synchronously by awaiting it in a `tokio::runtime::Handle`
-    //             let store = tokio::runtime::Handle::current()
-    //                 .block_on(self.clone_store());
-    //             store
-    //         })
-    //         .clone() // Return a clone of the cached store
-    // }
-
-    async fn clone_store(&self) -> MemoryStore {
-        let lock = self.inner.lock().await;
-        lock.store.clone()
-    }
-
-    async fn clone_client(&self) -> BasicClient {
-        let lock = self.inner.lock().await;
-        lock.oauth_client.clone()
-    }
-
-    async fn set_csrf_state(&mut self, new_csrf_state: CsrfToken) {
+    async fn set_csrf_state(&self, new_csrf_state: CsrfToken) {
         let mut lock = self.inner.lock().await;
         lock.csrf_state = Some(new_csrf_state);
     }
 
-    async fn get_auth_url(&self) -> (Url, CsrfToken) {
-        let lock = self.inner.lock().await;
-        let (auth_url, csrf_state) = lock.oauth_client
+    fn get_auth_url(&self) -> (Url, CsrfToken) {
+        let (auth_url, csrf_state) = self.oauth_client
             .authorize_url(CsrfToken::new_random)
             .add_scope(Scope::new(
-                "activity:read_all".to_string(),
+                "activity:read_all".to_owned(),
             ))
             .url();
         (auth_url, csrf_state)
@@ -127,11 +117,12 @@ impl AppState {
 
     async fn match_csrf(&self, request_csrf_state: CsrfToken) -> bool {
         let lock = self.inner.lock().await;
-        if let Some(v) = lock.csrf_state.as_ref() {
-            request_csrf_state.secret() == v.secret()
-        } else {
-            false
-        }
+
+        lock.csrf_state.as_ref()
+            .map_or(
+                false,
+                |v| request_csrf_state.secret() == v.secret()
+            )
     }
 
     async fn fetch_token(
@@ -139,8 +130,7 @@ impl AppState {
         code: String,
         client_id: String,
         client_secret: String) -> Result<AuthTokens, anyhow::Error> {
-        let lock = self.inner.lock().await;
-        let token_response = lock.oauth_client
+        let token_response = self.oauth_client
             .exchange_code(AuthorizationCode::new(code))
             .add_extra_param("client_id", client_id)
             .add_extra_param("client_secret", client_secret)
@@ -150,13 +140,12 @@ impl AppState {
 
         Ok(AuthTokens {
             access: token_response.access_token().clone(),
-            refresh: token_response.refresh_token().map(|t| t.clone()),
+            refresh: token_response.refresh_token().cloned(),
         })
     }
 
     async fn store_session(&self, session: Session) -> Result<String, anyhow::Error> {
-        let lock = self.inner.lock().await;
-        let val: String = lock.store
+        let val: String = self.store
             .store_session(session)
             .await
             .context("failed to store session")?
@@ -168,14 +157,14 @@ impl AppState {
 }
 
 impl FromRef<AppState> for MemoryStore {
-    fn from_ref(state: &AppState) -> Self {
-        Handle::current().block_on(state.clone_store())
+    fn from_ref(input: &AppState) -> Self {
+        input.store.clone()
     }
 }
 
 impl FromRef<AppState> for BasicClient {
-    fn from_ref(state: &AppState) -> Self {
-        Handle::current().block_on(state.clone_client())
+    fn from_ref(input: &AppState) -> Self {
+        input.oauth_client.clone()
     }
 }
 
@@ -188,14 +177,14 @@ fn oauth_client() -> Result<BasicClient, AppError> {
     let client_id = env::var("CLIENT_ID").context("Missing CLIENT_ID!")?;
     let client_secret = env::var("CLIENT_SECRET").context("Missing CLIENT_SECRET!")?;
     let redirect_url = env::var("REDIRECT_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000/auth/authorized".to_string());
+        .unwrap_or_else(|_| "http://127.0.0.1:3000/auth/authorized".to_owned());
 
     let auth_url = env::var("AUTH_URL").unwrap_or_else(|_| {
-        "http://www.strava.com/oauth/authorize".to_string()
+        "http://www.strava.com/oauth/authorize".to_owned()
     });
 
     let token_url = env::var("TOKEN_URL")
-        .unwrap_or_else(|_| "https://www.strava.com/oauth/token".to_string());
+        .unwrap_or_else(|_| "https://www.strava.com/oauth/token".to_owned());
 
     Ok(BasicClient::new(
         ClientId::new(client_id),
@@ -227,8 +216,8 @@ async fn index(user: Option<User>) -> impl IntoResponse {
 }
 
 #[debug_handler]
-async fn strava_auth(State(mut app_state): State<AppState>) -> impl IntoResponse {
-    let (auth_url, csrf_state) = app_state.get_auth_url().await;
+async fn strava_auth(State(app_state): State<AppState>) -> impl IntoResponse {
+    let (auth_url, csrf_state) = app_state.get_auth_url();
 
     app_state.set_csrf_state(csrf_state).await;
 
@@ -244,15 +233,12 @@ async fn logout(
         .get(COOKIE_NAME)
         .context("unexpected error getting cookie name")?;
 
-    let session = match store
-        .load_session(cookie.to_string())
+    let Some(session) = store
+        .load_session(cookie.to_owned())
         .await
-        .context("failed to load session")?
-    {
-        Some(s) => s,
-        // No session active, just redirect
-        None => return Ok(Redirect::to("/")),
-    };
+        .context("failed to load session")? else {
+            return Ok(Redirect::to("/"))
+        };
 
     store
         .destroy_session(session)
@@ -283,14 +269,16 @@ async fn login_authorized(
     let client_id = env::var("CLIENT_ID").context("Missing CLIENT_ID!")?;
     let client_secret = env::var("CLIENT_SECRET").context("Missing CLIENT_SECRET!")?;
 
-    let request_csrf_state = CsrfToken::new(query.state.to_string());
+    let request_csrf_state = CsrfToken::new(query.state);
 
     if !app_state.match_csrf(request_csrf_state).await {
         tracing::warn!("CSRF token mismatch");
-        panic!("CSRF token mismatch");
+        return Err(AppError::new("CSRF token mismatch"));
     }
 
     let auth_tokens = app_state.fetch_token(query.code.clone(), client_id, client_secret).await?;
+
+    tracing::info!("Refresh token is {:?}", auth_tokens.refresh);
 
     // Fetch user data from Strava
     let client = reqwest::Client::new();
@@ -346,25 +334,38 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let store = MemoryStore::from_ref(state);
 
-        let cookies = parts
+        let cookies = match parts
             .extract::<TypedHeader<headers::Cookie>>()
             .await
-            .map_err(|e| match *e.name() {
-                header::COOKIE => match e.reason() {
-                    TypedHeaderRejectionReason::Missing => AuthRedirect,
-                    _ => panic!("unexpected error getting Cookie header(s): {e}"),
-                },
-                _ => panic!("unexpected error getting cookies: {e}"),
-            })?;
+        {
+            Ok(cookies) => cookies,
+            Err(error) => {
+                if *error.name() == header::COOKIE {
+                    if !matches!(*error.reason(), TypedHeaderRejectionReason::Missing) {
+                        tracing::error!("Unexpected error getting Cookie header(s): {error}");
+                    }
+                } else {
+                    tracing::error!("Unexpected error getting cookies: {error}");
+                }
+                return Err(AuthRedirect); // For other errors, return auth redirect
+            }
+        };
+
         let session_cookie = cookies.get(COOKIE_NAME).ok_or(AuthRedirect)?;
 
-        let session = store
-            .load_session(session_cookie.to_string())
-            .await
-            .unwrap()
-            .ok_or(AuthRedirect)?;
+        let Ok(Some(session)) = store
+            .load_session(session_cookie.to_owned())
+             .await else {
+             tracing::warn!("Failed to load session or session is invalid");
+             return Err(AuthRedirect); // Session not found or invalid, redirect to auth page
+        };
 
-        let user = session.get::<User>("user").ok_or(AuthRedirect)?;
+        let user = session
+            .get::<Self>("user")
+            .ok_or_else(|| {
+                tracing::warn!("User not found in session");
+                AuthRedirect // User data not found in session, redirect to auth page
+            })?;
 
         Ok(user)
     }
@@ -375,12 +376,20 @@ where
 #[derive(Debug)]
 struct AppError(anyhow::Error);
 
+impl AppError {
+    // Optional: a helper function to create AppError from a message
+    fn new(message: impl Into<String>) -> Self {
+        Self(anyhow::anyhow!(message.into())) // Convert `message` to `String`
+    }
+}
+
 // Tell axum how to convert `AppError` into a response.
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        let error_message = self.0.to_string(); // Get the string representation of the error
         tracing::error!("Application error: {:#}", self.0);
 
-        (StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong").into_response()
+        (StatusCode::INTERNAL_SERVER_ERROR, error_message).into_response()
     }
 }
 
