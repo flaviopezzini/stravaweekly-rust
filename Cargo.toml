@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 async-session = "3.0.0"
-axum = "0.7.7"
+axum = { version = "0.7.7", features = ["macros"] }
 axum-extra = { version = "0.9.4", features = ["typed-header"] }
 
 http = "1.0.0"

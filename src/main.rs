@@ -1,13 +1,3 @@
-//! Example OAuth (Strava) implementation.
-//!
-//! 1) Create a new application at Strava
-//! 2) Visit the settings to get your `CLIENT_ID` and `CLIENT_SECRET`
-//! 3) Add a new redirect URI (for this example: `http://127.0.0.1:3000/auth/authorized`)
-//! 4) Run with the following (replacing values appropriately):
-//! ```not_rust
-//! CLIENT_ID=REPLACE_ME CLIENT_SECRET=REPLACE_ME cargo run -p example-oauth
-//! ```
-
 use anyhow::{Context, Result};
 use async_session::{MemoryStore, Session, SessionStore};
 use axum::{
@@ -16,17 +6,19 @@ use axum::{
     http::{header::SET_COOKIE, HeaderMap},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
+    debug_handler,
     RequestPartsExt, Router,
 };
 use axum_extra::{headers, typed_header::TypedHeaderRejectionReason, TypedHeader};
 
 use http::{header, request::Parts, StatusCode};
 use oauth2::{
-    basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode, ClientId,
-    ClientSecret, CsrfToken, RedirectUrl, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, reqwest::async_http_client, AccessToken, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::env;
+use std::{env, sync::Arc};
+use tokio::{runtime::Handle, sync::Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 static COOKIE_NAME: &str = "SESSION";
@@ -44,10 +36,8 @@ async fn main() {
     // `MemoryStore` is just used as an example. Don't use this in production.
     let store = MemoryStore::new();
     let oauth_client = oauth_client().unwrap();
-    let app_state = AppState {
-        store,
-        oauth_client,
-    };
+
+    let app_state = AppState::new(store, oauth_client);
 
     let app = Router::new()
         .route("/", get(index))
@@ -74,19 +64,118 @@ async fn main() {
 
 #[derive(Clone)]
 struct AppState {
+    inner: Arc<Mutex<AppStateInner>>,
+}
+struct AppStateInner {
     store: MemoryStore,
     oauth_client: BasicClient,
+    csrf_state: Option<CsrfToken>,
+}
+
+impl AppState {
+    fn new(store: MemoryStore, oauth_client: BasicClient) -> Self {
+        Self {
+            inner: Arc::new(
+                Mutex::new(
+                    AppStateInner {
+                        store,
+                        oauth_client,
+                        csrf_state: None,
+                    }
+                )
+            )
+        }
+    }
+
+    // fn get_store(&self) -> MemoryStore {
+    //     // Try to get the store from the cache, or initialize it if not already set
+    //     self.store_cache
+    //         .get_or_init(|| {
+    //             // Access `clone_store` synchronously by awaiting it in a `tokio::runtime::Handle`
+    //             let store = tokio::runtime::Handle::current()
+    //                 .block_on(self.clone_store());
+    //             store
+    //         })
+    //         .clone() // Return a clone of the cached store
+    // }
+
+    async fn clone_store(&self) -> MemoryStore {
+        let lock = self.inner.lock().await;
+        lock.store.clone()
+    }
+
+    async fn clone_client(&self) -> BasicClient {
+        let lock = self.inner.lock().await;
+        lock.oauth_client.clone()
+    }
+
+    async fn set_csrf_state(&mut self, new_csrf_state: CsrfToken) {
+        let mut lock = self.inner.lock().await;
+        lock.csrf_state = Some(new_csrf_state);
+    }
+
+    async fn get_auth_url(&self) -> (Url, CsrfToken) {
+        let lock = self.inner.lock().await;
+        let (auth_url, csrf_state) = lock.oauth_client
+            .authorize_url(CsrfToken::new_random)
+            .add_scope(Scope::new(
+                "activity:read_all".to_string(),
+            ))
+            .url();
+        (auth_url, csrf_state)
+    }
+
+    async fn match_csrf(&self, request_csrf_state: CsrfToken) -> bool {
+        let lock = self.inner.lock().await;
+        if let Some(v) = lock.csrf_state.as_ref() {
+            request_csrf_state.secret() == v.secret()
+        } else {
+            false
+        }
+    }
+
+    async fn fetch_token(
+        &self,
+        code: String,
+        client_id: String,
+        client_secret: String) -> Result<AuthTokens, anyhow::Error> {
+        let lock = self.inner.lock().await;
+        let token_response = lock.oauth_client
+            .exchange_code(AuthorizationCode::new(code))
+            .add_extra_param("client_id", client_id)
+            .add_extra_param("client_secret", client_secret)
+            .request_async(async_http_client)
+            .await
+            .context("failed in sending request request to authorization server")?;
+
+        Ok(AuthTokens {
+            access: token_response.access_token().clone(),
+            refresh: token_response.refresh_token().map(|t| t.clone()),
+        })
+    }
+
+    async fn store_session(&self, session: Session) -> Result<String, anyhow::Error> {
+        let lock = self.inner.lock().await;
+        let val: String = lock.store
+            .store_session(session)
+            .await
+            .context("failed to store session")?
+            .context("unexpected error retrieving cookie value")?;
+
+        Ok(val)
+    }
+
 }
 
 impl FromRef<AppState> for MemoryStore {
     fn from_ref(state: &AppState) -> Self {
-        state.store.clone()
+        Handle::current().block_on(state.clone_store())
     }
 }
 
 impl FromRef<AppState> for BasicClient {
     fn from_ref(state: &AppState) -> Self {
-        state.oauth_client.clone()
+        Handle::current().block_on(state.clone_client())
     }
 }
 
@@ -137,16 +226,11 @@ async fn index(user: Option<User>) -> impl IntoResponse {
     }
 }
 
-async fn strava_auth(State(client): State<BasicClient>) -> impl IntoResponse {
-    // TODO: this example currently doesn't validate the CSRF token during login attempts. That
-    // makes it vulnerable to cross-site request forgery. If you copy code from this example make
-    // sure to add a check for the CSRF token.
-    //
-    // Issue for adding check to this example https://github.com/tokio-rs/axum/issues/2511
-    let (auth_url, _csrf_token) = client
-        .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new("activity:read_all".to_string()))
-        .url();
+#[debug_handler]
+async fn strava_auth(State(mut app_state): State<AppState>) -> impl IntoResponse {
+    let (auth_url, csrf_state) = app_state.get_auth_url().await;
+
+    app_state.set_csrf_state(csrf_state).await;
 
     // Redirect to Strava's oauth service
     Redirect::to(auth_url.as_ref())
@@ -179,38 +263,40 @@ async fn logout(
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct AuthRequest {
     code: String,
     state: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AuthTokens {
+    access: AccessToken,
+    refresh: Option<RefreshToken>,
+}
+
+#[debug_handler]
 async fn login_authorized(
     Query(query): Query<AuthRequest>,
-    State(store): State<MemoryStore>,
-    State(oauth_client): State<BasicClient>,
+    State(app_state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
     // Get an auth token
-    let client_id =
-    //    "41187".into();
-    env::var("CLIENT_ID").context("Missing CLIENT_ID!")?;
-    let client_secret =
-        //"b16cc31914b5c69b7e983e7a9a11559979d6aa67".into();
-    env::var("CLIENT_SECRET").context("Missing CLIENT_SECRET!")?;
+    let client_id = env::var("CLIENT_ID").context("Missing CLIENT_ID!")?;
+    let client_secret = env::var("CLIENT_SECRET").context("Missing CLIENT_SECRET!")?;
 
-    let token = oauth_client
-        .exchange_code(AuthorizationCode::new(query.code.clone()))
-        .add_extra_param("client_id", client_id)
-        .add_extra_param("client_secret", client_secret)
-        .request_async(async_http_client)
-        .await
-        .context("failed in sending request request to authorization server")?;
+    let request_csrf_state = CsrfToken::new(query.state.to_string());
+
+    if !app_state.match_csrf(request_csrf_state).await {
+        tracing::warn!("CSRF token mismatch");
+        panic!("CSRF token mismatch");
+    }
+
+    let auth_tokens = app_state.fetch_token(query.code.clone(), client_id, client_secret).await?;
 
     // Fetch user data from Strava
     let client = reqwest::Client::new();
     let user_data: User = client
         .get("https://www.strava.com/api/v3/athlete")
-        .bearer_auth(token.access_token().secret())
+        .bearer_auth(auth_tokens.access.secret())
         .send()
         .await
         .context("failed in sending request to target Url")?
@@ -225,11 +311,7 @@ async fn login_authorized(
         .context("failed in inserting serialized value into session")?;
 
     // Store session and get corresponding cookie
-    let cookie = store
-        .store_session(session)
-        .await
-        .context("failed to store session")?
-        .context("unexpected error retrieving cookie value")?;
+    let cookie = app_state.store_session(session).await?;
 
     // Build the cookie
     let cookie = format!("{COOKIE_NAME}={cookie}; SameSite=Lax; Path=/");
