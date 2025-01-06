@@ -30,6 +30,7 @@ mod session_data;
 
 #[derive(Clone)]
 struct AppState {
+    app_config: AppConfig,
     sessions: Arc<DashMap<String, SessionData>>,
     auth_client: AuthClient,
     inner: Arc<Mutex<AppStateInner>>,
@@ -40,8 +41,9 @@ struct AppStateInner {
 }
 
 impl AppState {
-    fn new(auth_client: AuthClient) -> Self {
+    fn new(app_config: AppConfig, auth_client: AuthClient) -> Self {
         Self {
+            app_config,
             sessions: Arc::new(DashMap::new()),
             auth_client,
             inner: Arc::new(Mutex::new(AppStateInner { csrf_state: None })),
@@ -61,7 +63,7 @@ impl AppState {
     }
 }
 
-async fn is_authenticated(session: &Option<SessionData>) -> bool {
+async fn is_authenticated(app_state: AppState, session: &Option<SessionData>) -> bool {
     if let Some(session_data) = session.as_ref() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -75,7 +77,7 @@ async fn is_authenticated(session: &Option<SessionData>) -> bool {
 
         // If access token expired, try to use refresh token
         if let Some(refresh_token) = &session_data.refresh_token {
-            if let Ok(new_tokens) = refresh_tokens(refresh_token).await {
+            if let Ok(new_tokens) = refresh_tokens(&app_state.app_config, refresh_token).await {
                 // Here you would need to update the session with new tokens
                 return true;
             }
@@ -84,17 +86,14 @@ async fn is_authenticated(session: &Option<SessionData>) -> bool {
     false
 }
 
-async fn refresh_tokens(refresh_token: &RefreshToken) -> Result<AuthTokens, anyhow::Error> {
+async fn refresh_tokens(app_config: &AppConfig, refresh_token: &RefreshToken) -> Result<AuthTokens, anyhow::Error> {
     let client = Client::new();
-
-    let client_id = env::var("CLIENT_ID").context("Missing CLIENT_ID!")?;
-    let client_secret = env::var("CLIENT_SECRET").context("Missing CLIENT_SECRET!")?;
 
     let token_response = client
         .post("https://www.strava.com/oauth/token")
         .form(&[
-            ("client_id", &client_id),
-            ("client_secret", &client_secret),
+            ("client_id", &app_config.client_id),
+            ("client_secret", &app_config.get_secret()),
             ("grant_type", &"refresh_token".to_string()),
             ("refresh_token", refresh_token.secret()),
         ])
@@ -108,8 +107,11 @@ async fn refresh_tokens(refresh_token: &RefreshToken) -> Result<AuthTokens, anyh
     Ok(token_response)
 }
 
-async fn index(Extension(session): Extension<Option<SessionData>>) -> impl IntoResponse {
-    if is_authenticated(&session).await {
+async fn index(
+    State(app_state): State<AppState>,
+    Extension(session): Extension<Option<SessionData>>
+) -> impl IntoResponse {
+    if is_authenticated(app_state, &session).await {
         Html(format!(
             "Hey {}! You're logged in!\nClick <a href='/logout'>here</a> to log out",
             session.as_ref().unwrap().user.username
@@ -237,8 +239,8 @@ async fn main() {
 
     let app_config = AppConfig::new();
 
-    let auth_client = AuthClient::new(app_config).expect("Error configuring Oauth2 Client");
-    let app_state = AppState::new(auth_client);
+    let auth_client = AuthClient::new(&app_config).expect("Error configuring Oauth2 Client");
+    let app_state = AppState::new(app_config, auth_client);
 
     let app = Router::new()
         .route("/", get(index))

@@ -15,17 +15,17 @@ pub struct AuthClient {
 }
 
 impl AuthClient {
-    pub fn new(app_config: AppConfig) -> Result<Self, anyhow::Error> {
+    pub fn new(app_config: &AppConfig) -> Result<Self, anyhow::Error> {
         Ok(
             Self {
                 oauth_client: BasicClient::new(
-                    ClientId::new(app_config.client_id),
-                    Some(ClientSecret::new(app_config.client_secret)),
-                    AuthUrl::new(app_config.auth_url).context("failed to create new authorization server URL")?,
-                    Some(TokenUrl::new(app_config.token_url).context("failed to create new token endpoint URL")?),
+                    ClientId::new(app_config.client_id.clone()),
+                    Some(ClientSecret::new(app_config.get_secret())),
+                    AuthUrl::new(app_config.auth_url.clone()).context("failed to create new authorization server URL")?,
+                    Some(TokenUrl::new(app_config.token_url.clone()).context("failed to create new token endpoint URL")?),
                 )
                 .set_redirect_uri(
-                    RedirectUrl::new(app_config.redirect_url).context("failed to create new redirection URL")?,
+                    RedirectUrl::new(app_config.redirect_url.clone()).context("failed to create new redirection URL")?,
                 )
             }
         )
