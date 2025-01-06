@@ -1,23 +1,24 @@
 use oauth2::{
-    basic::BasicClient, reqwest::async_http_client, AuthUrl, AuthorizationCode,
-    ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenUrl
 };
 
-use reqwest::Url;
+use reqwest::{Client, Url};
 
 use anyhow::Context;
 
-use crate::{app_config::AppConfig, domain::AuthTokens};
+use crate::{app_config::AppConfig, domain::AuthResponse};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AuthClient {
+    app_config: AppConfig,
     oauth_client: BasicClient,
 }
 
 impl AuthClient {
-    pub fn new(app_config: &AppConfig) -> Result<Self, anyhow::Error> {
+    pub fn new(app_config: AppConfig) -> Result<Self, anyhow::Error> {
         Ok(
             Self {
+                app_config: app_config.clone(),
                 oauth_client: BasicClient::new(
                     ClientId::new(app_config.client_id.clone()),
                     Some(ClientSecret::new(app_config.get_secret())),
@@ -44,23 +45,49 @@ impl AuthClient {
     pub async fn fetch_token(
         &self,
         code: String,
-        client_id: String,
-        client_secret: String,
-    ) -> Result<AuthTokens, anyhow::Error> {
-        let token_response = self
-            .oauth_client
-            .exchange_code(AuthorizationCode::new(code))
-            .add_extra_param("client_id", client_id)
-            .add_extra_param("client_secret", client_secret)
-            .request_async(async_http_client)
-            .await
-            .context("failed in sending request to authorization server")?;
+    ) -> Result<AuthResponse, anyhow::Error> {
+        let client = Client::new();
 
-        Ok(
-            AuthTokens::new(
-                token_response.access_token().clone(),
-                token_response.refresh_token().cloned()
-            )
-        )
+        let token_response = client
+            .post("https://www.strava.com/oauth/token")
+            .form(&[
+                ("client_id", &self.app_config.client_id),
+                ("client_secret", &self.app_config.get_secret()),
+                ("code", &code),
+                ("grant_type", &"authorization_code".to_string()),
+            ])
+            .send()
+            .await
+            .context("Failed to exchange code for tokens")?
+            .json::<AuthResponse>()
+            .await
+            .context("Failed to parse fetch token response")?;
+
+        Ok(token_response)
+    }
+
+    pub async fn refresh_tokens(
+        &self,
+        app_config: &AppConfig,
+        refresh_token: String,
+    ) -> Result<AuthResponse, anyhow::Error> {
+        let client = Client::new();
+
+        let token_response = client
+            .post("https://www.strava.com/oauth/token")
+            .form(&[
+                ("client_id", &app_config.client_id),
+                ("client_secret", &app_config.get_secret()),
+                ("grant_type", &"refresh_token".to_string()),
+                ("refresh_token", &refresh_token),
+            ])
+            .send()
+            .await
+            .context("Failed to send token refresh request")?
+            .json::<AuthResponse>()
+            .await
+            .context("Failed to parse token refresh response")?;
+
+        Ok(token_response)
     }
 }

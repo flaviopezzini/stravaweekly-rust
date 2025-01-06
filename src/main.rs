@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use app_config::AppConfig;
+use app_session::SessionId;
+use app_state::AppState;
 use auth_client::AuthClient;
 use axum::{
     debug_handler,
@@ -7,114 +9,63 @@ use axum::{
     http::{header::SET_COOKIE, HeaderMap},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
-    Extension, Router,
+    Router,
 };
-use dashmap::DashMap;
-use domain::{AuthTokens, StravaUser};
 use http::StatusCode;
-use oauth2::{
-    basic::BasicClient, reqwest::async_http_client, AccessToken, AuthUrl, AuthorizationCode,
-    ClientId, ClientSecret, CsrfToken, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
-};
-use reqwest::{Client, Url};
+use oauth2::CsrfToken;
 use serde::Deserialize;
-use session_data::SessionData;
-use std::{env, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
-use tokio::sync::Mutex;
-use uuid::Uuid;
+use session_data::{AuthorizedSessionData, SessionData};
 
 mod app_config;
+mod app_session;
+mod app_state;
 mod auth_client;
 mod domain;
 mod session_data;
 
-#[derive(Clone)]
-struct AppState {
-    app_config: AppConfig,
-    sessions: Arc<DashMap<String, SessionData>>,
-    auth_client: AuthClient,
-    inner: Arc<Mutex<AppStateInner>>,
-}
-
-struct AppStateInner {
-    csrf_state: Option<CsrfToken>,
-}
-
-impl AppState {
-    fn new(app_config: AppConfig, auth_client: AuthClient) -> Self {
-        Self {
-            app_config,
-            sessions: Arc::new(DashMap::new()),
-            auth_client,
-            inner: Arc::new(Mutex::new(AppStateInner { csrf_state: None })),
-        }
+async fn is_authenticated(app_state: AppState, headers: HeaderMap) -> bool {
+    let session_id: SessionId;
+    if let Some(s_id) = get_session_id_cookie(headers) {
+        session_id = s_id;
+    } else {
+        return false;
     }
 
-    async fn set_csrf_state(&self, new_csrf_state: CsrfToken) {
-        let mut lock = self.inner.lock().await;
-        lock.csrf_state = Some(new_csrf_state);
+    let session_data: SessionData;
+    if let Some(data) = app_state.sessions.get(session_id.clone()) {
+        session_data = data;
+    } else {
+        return false;
     }
 
-    async fn match_csrf(&self, request_csrf_state: CsrfToken) -> bool {
-        let lock = self.inner.lock().await;
-        lock.csrf_state
-            .as_ref()
-            .map_or(false, |v| request_csrf_state.secret() == v.secret())
-    }
-}
-
-async fn is_authenticated(app_state: AppState, session: &Option<SessionData>) -> bool {
-    if let Some(session_data) = session.as_ref() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        todo!("Pending token expiration check");
-        if session_data.is_active() { // Example: if less than 1 hour has passed
-            return true;
-        }
-
-        // If access token expired, try to use refresh token
-        if let Some(refresh_token) = &session_data.refresh_token {
-            if let Ok(new_tokens) = refresh_tokens(&app_state.app_config, refresh_token).await {
-                // Here you would need to update the session with new tokens
+    match session_data {
+        SessionData::NotYetAuthorized(_) => return false,
+        SessionData::Authorized(data) => {
+            if data.is_access_token_valid() {
                 return true;
+            } else {
+                if let Ok(new_tokens) = app_state.auth_client
+                    .refresh_tokens(&app_state.app_config, data.refresh_token.to_string()).await {
+
+                    let new_session_data =
+                        AuthorizedSessionData::refresh_tokens(data.to_owned(), new_tokens);
+
+                    app_state.sessions.update(session_id, new_session_data);
+                    return true;
+                }
             }
-        }
-    }
+        },
+    };
     false
-}
-
-async fn refresh_tokens(app_config: &AppConfig, refresh_token: &RefreshToken) -> Result<AuthTokens, anyhow::Error> {
-    let client = Client::new();
-
-    let token_response = client
-        .post("https://www.strava.com/oauth/token")
-        .form(&[
-            ("client_id", &app_config.client_id),
-            ("client_secret", &app_config.get_secret()),
-            ("grant_type", &"refresh_token".to_string()),
-            ("refresh_token", refresh_token.secret()),
-        ])
-        .send()
-        .await
-        .context("Failed to send token refresh request")?
-        .json::<AuthTokens>()
-        .await
-        .context("Failed to parse token refresh response")?;
-
-    Ok(token_response)
 }
 
 async fn index(
     State(app_state): State<AppState>,
-    Extension(session): Extension<Option<SessionData>>
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    if is_authenticated(app_state, &session).await {
+    if is_authenticated(app_state, headers).await {
         Html(format!(
-            "Hey {}! You're logged in!\nClick <a href='/logout'>here</a> to log out",
-            session.as_ref().unwrap().user.username
+            "Hey! You're logged in!\nClick <a href='/logout'>here</a> to log out",
         ))
     } else {
         Html("You're not logged in.\nClick <a href='/auth/strava'>here</a> to do so.".to_owned())
@@ -124,16 +75,11 @@ async fn index(
 #[debug_handler]
 async fn strava_auth(State(app_state): State<AppState>) -> impl IntoResponse {
     let (auth_url, csrf_state) = app_state.auth_client.get_auth_url();
-    app_state.set_csrf_state(csrf_state).await;
+    app_state.sessions.add(csrf_state);
     Redirect::to(auth_url.as_ref())
 }
 
-async fn logout(
-    State(app_state): State<AppState>,
-    Extension(_session): Extension<Option<SessionData>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    // Remove session from DashMap if it exists
+fn get_session_id_cookie(headers: HeaderMap) -> Option<SessionId> {
     if let Some(cookie) = headers.get(http::header::COOKIE) {
         if let Ok(cookie_str) = cookie.to_str() {
             if let Some(session_cookie) = cookie_str
@@ -141,17 +87,50 @@ async fn logout(
                 .find(|s| s.trim().starts_with("session="))
             {
                 let session_id = &session_cookie.trim()["session=".len()..];
-                app_state.sessions.remove(session_id);
+                if let Ok(session_id) = SessionId::try_from(session_id.to_string()) {
+                    return Some(session_id);
+                } else {
+                    tracing::debug!("Error deserializing the session id cookie");
+                }
             }
         }
     }
 
-    // Clear the cookie
-    let cookie = "session=; SameSite=Lax; Path=/; HttpOnly; Max-Age=0";
-    let mut headers = HeaderMap::new();
-    headers.insert(SET_COOKIE, cookie.parse().unwrap());
+    None
+}
+
+async fn logout(
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Some(session_id) = get_session_id_cookie(headers) {
+        app_state.sessions.remove(session_id);
+    }
+
+    let headers = remove_session_cookie();
 
     (headers, Redirect::to("/"))
+}
+
+fn write_session_cookie(value: SessionId) -> HeaderMap {
+    let cookie = format!(
+        "session={}; SameSite=Lax; Path=/; HttpOnly; Secure",
+        value.to_string()
+    );
+
+    write_cookie(cookie)
+}
+
+fn remove_session_cookie() -> HeaderMap {
+    let cookie = "session=; SameSite=Lax; Path=/; HttpOnly; Max-Age=0";
+    write_cookie(cookie.to_string())
+}
+
+fn write_cookie(value: String) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(SET_COOKIE, value.parse().unwrap());
+
+    headers
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,73 +143,45 @@ struct AuthRequest {
 async fn login_authorized(
     Query(query): Query<AuthRequest>,
     State(app_state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    let client_id = env::var("CLIENT_ID").context("Missing CLIENT_ID!")?;
-    let client_secret = env::var("CLIENT_SECRET").context("Missing CLIENT_SECRET!")?;
-
     let request_csrf_state = CsrfToken::new(query.state);
 
-    if !app_state.match_csrf(request_csrf_state).await {
-        tracing::warn!("CSRF token mismatch");
+    let session_id: SessionId;
+    if let Some(s_id) = get_session_id_cookie(headers) {
+        session_id = s_id;
+    } else {
+        return Err(AppError::new("There was no session id cookie"));
+    }
+
+    let session_data: SessionData;
+    if let Some(data) = app_state.sessions.get(session_id.clone()) {
+        session_data = data;
+    } else {
+        return Err(AppError::new(format!("No session data for session id {:?}", session_id)));
+    }
+
+    let not_yet_authorized_session_data;
+    match session_data {
+        SessionData::NotYetAuthorized(data) => not_yet_authorized_session_data = data,
+        SessionData::Authorized(_) => {
+            return Err(AppError::new("Expected not authorized, but was authorized"));
+        }
+    }
+
+    if !not_yet_authorized_session_data.csrf_token.match_csrf(request_csrf_state) {
         return Err(AppError::new("CSRF token mismatch"));
     }
 
     let auth_tokens = app_state.auth_client
-        .fetch_token(query.code.clone(), client_id, client_secret)
+        .fetch_token(query.code.clone())
         .await?;
 
-    // Fetch user data from Strava
-    let client = reqwest::Client::new();
-    let user: StravaUser = client
-        .get("https://www.strava.com/api/v3/athlete")
-        .bearer_auth(auth_tokens.access.secret())
-        .send()
-        .await
-        .context("failed in sending request to Strava API")?
-        .json()
-        .await
-        .context("failed to deserialize response as JSON")?;
-
-    // Generate a new session ID
-    let session_id = Uuid::new_v4().to_string();
-
-    // Store session data
-    let session_data = SessionData::new(auth_tokens.access, auth_tokens.refresh, user);
-
-    app_state.sessions.insert(session_id.clone(), session_data);
-
-    // Set secure cookie with session ID
-    let cookie = format!(
-        "session={}; SameSite=Lax; Path=/; HttpOnly; Secure",
-        session_id
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert(SET_COOKIE, cookie.parse().unwrap());
+    let authorized_session_data = AuthorizedSessionData::new(auth_tokens);
+    app_state.sessions.update(session_id.clone(), authorized_session_data);
+    let headers = write_session_cookie(session_id);
 
     Ok((headers, Redirect::to("/")))
-}
-
-async fn session_middleware(
-    State(app_state): State<AppState>,
-    headers: HeaderMap,
-    mut request: axum::http::Request<axum::body::Body>,
-    next: axum::middleware::Next,
-) -> Response {
-    let session = headers
-        .get(http::header::COOKIE)
-        .and_then(|cookie| cookie.to_str().ok())
-        .and_then(|cookie_str| {
-            cookie_str
-                .split(';')
-                .find(|s| s.trim().starts_with("session="))
-        })
-        .and_then(|session_cookie| {
-            let session_id = &session_cookie.trim()["session=".len()..];
-            app_state.sessions.get(session_id).map(|r| r.clone())
-        });
-
-    request.extensions_mut().insert(session);
-    next.run(request).await
 }
 
 #[tokio::main]
@@ -239,7 +190,7 @@ async fn main() {
 
     let app_config = AppConfig::new();
 
-    let auth_client = AuthClient::new(&app_config).expect("Error configuring Oauth2 Client");
+    let auth_client = AuthClient::new(app_config.clone()).expect("Error configuring Oauth2 Client");
     let app_state = AppState::new(app_config, auth_client);
 
     let app = Router::new()
@@ -247,10 +198,6 @@ async fn main() {
         .route("/auth/strava", get(strava_auth))
         .route("/auth/authorized", get(login_authorized))
         .route("/logout", get(logout))
-        .layer(axum::middleware::from_fn_with_state(
-            app_state.clone(),
-            session_middleware,
-        ))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
