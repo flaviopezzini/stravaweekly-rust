@@ -1,4 +1,4 @@
-use crate::{app_config::AppConfig, app_session::AppSession, auth_client::AuthClient};
+use crate::{app_config::AppConfig, app_session::AppSession, strava_api::strava_auth::AuthClient};
 
 #[derive(Clone)]
 pub struct AppState {
