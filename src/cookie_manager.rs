@@ -1,6 +1,6 @@
 use axum::http::{header::SET_COOKIE, HeaderMap};
 
-use crate::app_session::SessionId;
+use crate::{app_session::SessionId, app_state::AppState, session_data::{AuthorizedSessionData, SessionData}};
 
 pub fn write_session_cookie(value: SessionId) -> HeaderMap {
     let cookie = format!(
@@ -41,4 +41,40 @@ pub fn get_session_id_cookie(headers: HeaderMap) -> Option<SessionId> {
     }
 
     None
+}
+
+pub async fn is_authenticated(app_state: AppState, headers: HeaderMap) -> bool {
+    let session_id: SessionId;
+    if let Some(s_id) = get_session_id_cookie(headers) {
+        session_id = s_id;
+    } else {
+        tracing::debug!("No session ID cookie");
+        return false;
+    }
+
+    let session_data: SessionData;
+    if let Some(data) = app_state.sessions.get(session_id.clone()) {
+        session_data = data;
+    } else {
+        tracing::debug!("No session data stored");
+        return false;
+    }
+
+    match session_data {
+        SessionData::NotYetAuthorized(_) => return false,
+        SessionData::Authorized(data) => {
+            if data.access_token.is_valid() {
+                return true;
+            } else if let Ok(new_tokens) = app_state.strava_client
+                    .refresh_tokens(&app_state.app_config, data.refresh_token).await {
+
+                    let new_session_data =
+                        AuthorizedSessionData::refresh_tokens(new_tokens);
+
+                    app_state.sessions.update(session_id, new_session_data);
+                    return true;
+            }
+        },
+    };
+    false
 }

@@ -1,4 +1,4 @@
-use http::HeaderMap;
+use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
 use oauth2::{
     basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenUrl
 };
@@ -6,18 +6,24 @@ use oauth2::{
 use reqwest::{Client, Url};
 
 use anyhow::Context;
+use serde::Deserialize;
 
-use crate::{app_config::AppConfig, app_session::SessionId, app_state::AppState, cookie_manager::get_session_id_cookie, domain::AuthResponse, session_data::{AuthorizedSessionData, MyRefreshToken, SessionData}};
+use crate::{app_config::AppConfig, domain::AuthResponse, session_data::MyRefreshToken};
 
 #[derive(Clone)]
-pub struct AuthClient {
+pub struct StravaClient {
     app_config: AppConfig,
     oauth_client: BasicClient,
 }
 
 const STRAVA_URL: &str = "https://www.strava.com";
 
-impl AuthClient {
+#[derive(Deserialize)]
+pub struct ActivityListPayload {
+
+}
+
+impl StravaClient {
     pub fn new(app_config: AppConfig) -> Result<Self, anyhow::Error> {
         Ok(
             Self {
@@ -34,7 +40,6 @@ impl AuthClient {
             }
         )
     }
-
 
     pub fn get_auth_url(&self) -> (Url, CsrfToken) {
         let (auth_url, csrf_state) = self
@@ -93,40 +98,40 @@ impl AuthClient {
 
         Ok(token_response)
     }
-}
 
-pub async fn is_authenticated(app_state: AppState, headers: HeaderMap) -> bool {
-    let session_id: SessionId;
-    if let Some(s_id) = get_session_id_cookie(headers) {
-        session_id = s_id;
-    } else {
-        tracing::debug!("No session ID cookie");
-        return false;
+    pub async fn list_athlete_activities(
+        user_timezone_offset_in_hours: i32,
+        start_date: NaiveDate,
+        end_date: NaiveDate
+    ) -> Result<ActivityListPayload, anyhow::Error> {
+        let client = Client::new();
+
+        let start_date_time = start_date.and_hms_opt(0, 0, 0).unwrap();
+        let end_date_time = end_date.and_hms_opt(0, 0, 0).unwrap();
+
+        let user_zone_offset = FixedOffset::east_opt(user_timezone_offset_in_hours * 3600).unwrap();
+
+        // Convert start_date and end_date to DateTime with the user's timezone
+        let zoned_start: DateTime<FixedOffset> =
+            user_zone_offset.from_local_datetime(&start_date_time).unwrap();
+        let zoned_end: DateTime<FixedOffset> =
+            user_zone_offset.from_local_datetime(&end_date_time).unwrap();
+
+        // Convert the DateTime to Unix timestamps (seconds since epoch)
+        let before = zoned_end.timestamp(); // End time
+        let after = zoned_start.timestamp(); // Start time
+
+        let token_response = client
+            .get(
+                format!("{}/api/v3/athlete/activities?before={}&after={}", STRAVA_URL, before, after)
+            )
+            .send()
+            .await
+            .context("Failed to send list activity request")?
+            .json::<ActivityListPayload>()
+            .await
+            .context("Failed to parse list activity response")?;
+
+        Ok(token_response)
     }
-
-    let session_data: SessionData;
-    if let Some(data) = app_state.sessions.get(session_id.clone()) {
-        session_data = data;
-    } else {
-        tracing::debug!("No session data stored");
-        return false;
-    }
-
-    match session_data {
-        SessionData::NotYetAuthorized(_) => return false,
-        SessionData::Authorized(data) => {
-            if data.access_token.is_valid() {
-                return true;
-            } else if let Ok(new_tokens) = app_state.auth_client
-                    .refresh_tokens(&app_state.app_config, data.refresh_token).await {
-
-                    let new_session_data =
-                        AuthorizedSessionData::refresh_tokens(new_tokens);
-
-                    app_state.sessions.update(session_id, new_session_data);
-                    return true;
-            }
-        },
-    };
-    false
 }

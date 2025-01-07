@@ -1,8 +1,9 @@
 use app_config::AppConfig;
 use app_state::AppState;
 use router_setup::setup_router;
-use crate::strava_api::strava_auth::AuthClient;
+use crate::strava_api::http_calls::StravaClient;
 
+mod activity_list;
 mod app_config;
 mod app_error;
 mod app_session;
@@ -21,8 +22,9 @@ async fn main() {
 
     let app_config = AppConfig::new();
 
-    let auth_client = AuthClient::new(app_config.clone()).expect("Error configuring Oauth2 Client");
-    let app_state = AppState::new(app_config, auth_client);
+    let strava_client = StravaClient::new(app_config.clone())
+        .expect("Error configuring Strava Oauth2 Client");
+    let app_state = AppState::new(app_config, strava_client);
 
     let app = setup_router(app_state);
 

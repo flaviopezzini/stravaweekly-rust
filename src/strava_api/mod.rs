@@ -1,2 +1,2 @@
-pub mod strava_auth;
+pub mod http_calls;
 pub mod strava_routes;

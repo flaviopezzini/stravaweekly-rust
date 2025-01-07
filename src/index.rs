@@ -2,8 +2,9 @@ use axum::response::Html;
 use axum::{extract::State, response::IntoResponse};
 use axum::http::HeaderMap;
 
+use crate::activity_list::show_activity_list;
 use crate::app_state::AppState;
-use crate::strava_api::strava_auth::is_authenticated;
+use crate::cookie_manager::is_authenticated;
 
 #[axum::debug_handler]
 pub async fn show_index(
@@ -11,10 +12,12 @@ pub async fn show_index(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if is_authenticated(app_state, headers).await {
-        Html(format!(
-            "Hey! You're logged in!\nClick <a href='/logout'>here</a> to log out",
-        ))
+        show_activity_list().await.into_response()
     } else {
-        Html("You're not logged in.\nClick <a href='/auth/strava'>here</a> to do so.".to_owned())
+        show_not_logged_in().await.into_response()
     }
+}
+
+async fn show_not_logged_in() -> impl IntoResponse {
+    Html("You're not logged in.\nClick <a href='/auth/strava'>here</a> to do so.".to_owned())
 }

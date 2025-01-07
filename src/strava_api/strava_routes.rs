@@ -11,7 +11,7 @@ use crate::{
 
 #[axum::debug_handler]
 pub async fn redirect_to_strava_login_page(State(app_state): State<AppState>) -> impl IntoResponse {
-    let (auth_url, csrf_state) = app_state.auth_client.get_auth_url();
+    let (auth_url, csrf_state) = app_state.strava_client.get_auth_url();
 
     let session_id = SessionId::new();
 
@@ -73,7 +73,7 @@ pub async fn handle_login_authorized(
         return Err(AppError::new("CSRF token mismatch"));
     }
 
-    let auth_tokens = app_state.auth_client
+    let auth_tokens = app_state.strava_client
         .fetch_token(query.code.clone())
         .await?;
 
