@@ -19,8 +19,41 @@ pub struct StravaClient {
 const STRAVA_URL: &str = "https://www.strava.com";
 
 #[derive(Deserialize)]
-pub struct ActivityListPayload {
+pub struct ActivityListResponse {
+    pub list: Vec<ActivityResponse>
+}
 
+#[derive(Deserialize)]
+pub struct ActivityResponse {
+    id: u32,
+    name: String,
+    sport_type: String,
+    elapsed_time: u32,
+    moving_time: u32,
+    #[serde(rename = "type")]
+    activity_type: String,
+    workout_type: u32,
+    pub distance: u32,
+    start_date_local: String,
+    total_elevation_gain: u32,
+}
+
+impl ActivityResponse {
+    pub fn duration_in_seconds(&self) -> u32 {
+        if self.sport_type == "Run" && self.workout_type == 1 {
+            self.elapsed_time
+        } else {
+            self.moving_time
+        }
+    }
+
+    pub fn formatted_date(&self) -> String {
+        todo!()
+    }
+
+    pub fn miles(&self) -> f32 {
+
+    }
 }
 
 impl StravaClient {
