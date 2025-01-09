@@ -1,2 +1,3 @@
 .vscode/
 /target
+export_vars.sh

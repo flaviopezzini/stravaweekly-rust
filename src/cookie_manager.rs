@@ -1,80 +1,119 @@
-use axum::http::{header::SET_COOKIE, HeaderMap};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 
-use crate::{app_session::SessionId, app_state::AppState, session_data::{AuthorizedSessionData, SessionData}};
+use crate::{
+    app_state::AppState,
+    secret_value::SecretValue,
+    tokens::{MyJwtToken, MyRefreshToken}
+};
 
-pub fn write_session_cookie(value: SessionId) -> HeaderMap {
-    let cookie = format!(
-        "session={}; SameSite=Lax; Path=/; HttpOnly; Secure",
-        value
+pub async fn set_secure_cookie(
+    cookies: CookieJar,
+    name: String,
+    value: &[u8]) -> Result<CookieJar, anyhow::Error> {
+    let value = String::from_utf8(value.into())?;
+
+    let cookie = Cookie::build((name, value))
+        .http_only(true)
+        //.secure(true) TODO put back
+        .same_site(SameSite::Strict)
+        .build();
+
+    Ok(cookies.add(cookie))
+}
+
+pub fn get_secure_cookie(cookies: CookieJar, name: &str) -> Option<Vec<u8>> {
+    cookies.iter().for_each(|c|println!("Cookie name:{} value:{}", c.name(), c.value()));
+
+    if let Some(cookie) = cookies.get(name) {
+        Some(cookie.value().as_bytes().into())
+    } else {
+        None
+    }
+}
+
+pub const CSRF_COOKIE: &str = "s890dsjnnasdf89dsfsdau8f90sdfjsdfj";
+pub const JWT_COOKIE: &str = "sfd809sdf809saf809sdfads949sdoskase894jlksjf";
+pub const REFRESH_COOKIE: &str = "d78wgfuoijdwsfjsdfjdslkfjsadlkfn0989sdfhsdf";
+
+pub struct ValidJwtResult {
+    pub jwt: SecretValue,
+    pub cookies: CookieJar,
+}
+
+pub async fn get_valid_jwt_token(app_state: AppState, cookies: CookieJar) -> Option<ValidJwtResult> {
+    let jwt_cookie = get_secure_cookie(
+        cookies.clone(),
+        JWT_COOKIE
     );
-
-    write_cookie(cookie)
-}
-
-pub fn remove_session_cookie() -> HeaderMap {
-    let cookie = "session=; SameSite=Lax; Path=/; HttpOnly; Max-Age=0";
-    write_cookie(cookie.to_string())
-}
-
-fn write_cookie(value: String) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(SET_COOKIE, value.parse().unwrap());
-
-    headers
-}
-
-pub fn get_session_id_cookie(headers: HeaderMap) -> Option<SessionId> {
-    if let Some(cookie) = headers.get(http::header::COOKIE) {
-        if let Ok(cookie_str) = cookie.to_str() {
-            if let Some(session_cookie) = cookie_str
-                .split(';')
-                .find(|s| s.trim().starts_with("session="))
-            {
-                let session_id = &session_cookie.trim()["session=".len()..];
-                if let Ok(session_id) = SessionId::try_from(session_id.to_string()) {
-                    return Some(session_id);
+    if let Some(jwt_cookie_bytes) = jwt_cookie {
+        match MyJwtToken::from_bytes(&jwt_cookie_bytes) {
+            Ok(jwt_cookie) => {
+                if jwt_cookie.is_valid() {
+                    return Some(
+                        ValidJwtResult {
+                            jwt: SecretValue::new(jwt_cookie.value),
+                            cookies: cookies.clone()
+                        }
+                    )
                 } else {
-                    tracing::debug!("Error deserializing the session id cookie");
+                    return None;
                 }
+            },
+            Err(err) => {
+                tracing::debug!("Error converting jwt cookie from bytes to struct {}", err);
+                return None;
             }
         }
-    }
-
-    None
-}
-
-pub async fn is_authenticated(app_state: AppState, headers: HeaderMap) -> bool {
-    let session_id: SessionId;
-    if let Some(s_id) = get_session_id_cookie(headers) {
-        session_id = s_id;
     } else {
-        tracing::debug!("No session ID cookie");
-        return false;
-    }
+        let refresh_cookie = get_secure_cookie(
+            cookies.clone(),
+            REFRESH_COOKIE
+        );
+        if let Some(refresh_cookie_bytes) = refresh_cookie {
+            match MyRefreshToken::from_bytes(&refresh_cookie_bytes) {
+                Ok(refresh_token) => {
+                    if let Ok(new_tokens) = app_state.strava_client
+                            .refresh_tokens(&app_state.app_config, refresh_token).await {
+                        let with_jwt_added = match set_secure_cookie(
+                            cookies.clone(),
+                            JWT_COOKIE.into(),
+                            new_tokens.access_token.as_bytes()
+                        ).await {
+                            Ok(value) => value,
+                            Err(e) => {
+                                tracing::debug!("Error adding JWT cookie: {}", e);
+                                return None;
+                            }
+                        };
+                        let with_refresh_added = match set_secure_cookie(
+                            with_jwt_added,
+                            REFRESH_COOKIE.into(),
+                            new_tokens.refresh_token.as_bytes()
+                        ).await {
+                            Ok(value) => value,
+                            Err(e) => {
+                                tracing::debug!("Error adding Refresh cookie: {}", e);
+                                return None;
+                            }
+                        };
 
-    let session_data: SessionData;
-    if let Some(data) = app_state.sessions.get(session_id.clone()) {
-        session_data = data;
-    } else {
-        tracing::debug!("No session data stored");
-        return false;
-    }
-
-    match session_data {
-        SessionData::NotYetAuthorized(_) => return false,
-        SessionData::Authorized(data) => {
-            if data.access_token.is_valid() {
-                return true;
-            } else if let Ok(new_tokens) = app_state.strava_client
-                    .refresh_tokens(&app_state.app_config, data.refresh_token).await {
-
-                    let new_session_data =
-                        AuthorizedSessionData::refresh_tokens(new_tokens);
-
-                    app_state.sessions.update(session_id, new_session_data);
-                    return true;
+                        return Some(
+                            ValidJwtResult {
+                                jwt: SecretValue::new(new_tokens.access_token),
+                                cookies: with_refresh_added
+                            }
+                        );
+                    } else {
+                        return None;
+                    }
+                },
+                Err(err) => {
+                    tracing::debug!("Error converting refresh cookie from bytes to struct {}", err);
+                    return None;
+                }
             }
-        },
-    };
-    false
+        } else {
+            return None;
+        }
+    }
 }

@@ -1,14 +1,15 @@
-use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
 use oauth2::{
     basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenUrl
 };
 
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+
 use reqwest::{Client, Url};
 
 use anyhow::Context;
-use serde::Deserialize;
 
-use crate::{app_config::AppConfig, domain::AuthResponse, session_data::MyRefreshToken};
+use crate::{app_config::AppConfig, domain::AuthResponse, secret_value::SecretValue, tokens::MyRefreshToken};
 
 #[derive(Clone)]
 pub struct StravaClient {
@@ -17,44 +18,6 @@ pub struct StravaClient {
 }
 
 const STRAVA_URL: &str = "https://www.strava.com";
-
-#[derive(Deserialize)]
-pub struct ActivityListResponse {
-    pub list: Vec<ActivityResponse>
-}
-
-#[derive(Deserialize)]
-pub struct ActivityResponse {
-    id: u32,
-    name: String,
-    sport_type: String,
-    elapsed_time: u32,
-    moving_time: u32,
-    #[serde(rename = "type")]
-    activity_type: String,
-    workout_type: u32,
-    pub distance: u32,
-    start_date_local: String,
-    total_elevation_gain: u32,
-}
-
-impl ActivityResponse {
-    pub fn duration_in_seconds(&self) -> u32 {
-        if self.sport_type == "Run" && self.workout_type == 1 {
-            self.elapsed_time
-        } else {
-            self.moving_time
-        }
-    }
-
-    pub fn formatted_date(&self) -> String {
-        todo!()
-    }
-
-    pub fn miles(&self) -> f32 {
-
-    }
-}
 
 impl StravaClient {
     pub fn new(app_config: AppConfig) -> Result<Self, anyhow::Error> {
@@ -120,7 +83,7 @@ impl StravaClient {
                 ("client_id", &app_config.client_id.expose_secret()),
                 ("client_secret", &app_config.client_secret.expose_secret()),
                 ("grant_type", &"refresh_token".to_string()),
-                ("refresh_token", &refresh_token.value.expose_secret()),
+                ("refresh_token", &refresh_token.value),
             ])
             .send()
             .await
@@ -133,14 +96,12 @@ impl StravaClient {
     }
 
     pub async fn list_athlete_activities(
+        jwt_token: SecretValue,
         user_timezone_offset_in_hours: i32,
-        start_date: NaiveDate,
-        end_date: NaiveDate
-    ) -> Result<ActivityListPayload, anyhow::Error> {
+        start_date_time: NaiveDateTime,
+        end_date_time: NaiveDateTime
+    ) -> Result<String, anyhow::Error> {
         let client = Client::new();
-
-        let start_date_time = start_date.and_hms_opt(0, 0, 0).unwrap();
-        let end_date_time = end_date.and_hms_opt(0, 0, 0).unwrap();
 
         let user_zone_offset = FixedOffset::east_opt(user_timezone_offset_in_hours * 3600).unwrap();
 
@@ -154,14 +115,21 @@ impl StravaClient {
         let before = zoned_end.timestamp(); // End time
         let after = zoned_start.timestamp(); // Start time
 
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", jwt_token.expose_secret()))?
+        );
+
         let token_response = client
             .get(
                 format!("{}/api/v3/athlete/activities?before={}&after={}", STRAVA_URL, before, after)
             )
+            .headers(headers)
             .send()
             .await
             .context("Failed to send list activity request")?
-            .json::<ActivityListPayload>()
+            .json::<String>()
             .await
             .context("Failed to parse list activity response")?;
 

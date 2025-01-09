@@ -5,15 +5,14 @@ use crate::strava_api::http_calls::StravaClient;
 
 mod activity_list;
 mod app_config;
-mod app_error;
-mod app_session;
 mod app_state;
 mod cookie_manager;
 mod domain;
 mod index;
 mod router_setup;
 mod secret_value;
-mod session_data;
+mod serve_static;
+mod tokens;
 mod strava_api;
 
 #[tokio::main]
@@ -26,7 +25,7 @@ async fn main() {
         .expect("Error configuring Strava Oauth2 Client");
     let app_state = AppState::new(app_config, strava_client);
 
-    let app = setup_router(app_state);
+    let app = setup_router(app_state).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
