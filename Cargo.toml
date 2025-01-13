@@ -11,7 +11,6 @@ axum = { version = "0.8.1", features = ["macros"] }
 axum-extra = { version = "0.10.0", features = ["cookie"] }
 
 http = "1.0.0"
-oauth2 = "4.4.2"
 # Use Rustls because it makes it easier to cross-compile on CI
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -25,3 +24,5 @@ thiserror = "2.0.10"
 base64 = "0.22.1"
 serde_json = "1.0.135"
 dotenvy = "0.15.7"
+rand = "0.8.5"
+url = "2.5.4"

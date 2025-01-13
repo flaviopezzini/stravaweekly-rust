@@ -3,7 +3,6 @@ use axum::{
     response::{IntoResponse, Redirect},
 };
 use axum_extra::extract::{cookie::Cookie, CookieJar};
-use oauth2::CsrfToken;
 use serde::Deserialize;
 
 use crate::{
@@ -20,8 +19,6 @@ pub async fn redirect_to_strava_login_page(
     cookies: CookieJar,
 ) -> impl IntoResponse {
     let (auth_url, csrf_state) = app_state.strava_client.get_auth_url();
-
-    let csrf_state = MyCsrfToken(csrf_state);
 
     let cookie_value = match encode_cookie(csrf_state) {
         Ok(value) => value,
@@ -57,7 +54,7 @@ pub async fn handle_login_authorized(
     cookies: CookieJar,
     Query(query): Query<AuthRequest>,
 ) -> impl IntoResponse {
-    let request_csrf_state = CsrfToken::new(query.state);
+    let request_csrf_state = MyCsrfToken::from_state(query.state);
 
     let csrf_cookie = get_secure_cookie(cookies.clone(), MyCsrfToken::cookie_name());
 
