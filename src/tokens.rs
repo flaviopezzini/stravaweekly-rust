@@ -9,59 +9,40 @@ impl MyCsrfToken {
         self.0.secret() == request_csrf_state.secret()
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
+    pub fn cookie_name() -> &'static str {
+        "s890dsjnnasdf89dsfsdau8f90sdfjsdfj"
     }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
-    }
-
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct MyJwtToken {
+pub struct MyAccessToken {
     pub value: String,
     expires_at: u64,
 }
-impl MyJwtToken {
+impl MyAccessToken {
     pub fn new(value: String, expires_at: u64) -> Self {
-        Self {
-            value,
-            expires_at,
-        }
+        Self { value, expires_at }
     }
 
     pub fn is_valid(&self) -> bool {
         Utc::now().timestamp() as u64 > self.expires_at
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
+    pub fn cookie_name() -> &'static str {
+        "sfd809sdf809saf809sdfads949sdoskase894jlksjf"
     }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct MyRefreshToken{
-    pub value: String
+pub struct MyRefreshToken {
+    pub value: String,
 }
 impl MyRefreshToken {
     pub fn new(value: String) -> Self {
-        Self {
-            value
-        }
+        Self { value }
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
+    pub fn cookie_name() -> &'static str {
+        "d78wgfuoijdwsfjsdfjdslkfjsadlkfn0989sdfhsdf"
     }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
-    }
-
 }

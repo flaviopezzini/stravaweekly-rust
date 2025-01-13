@@ -4,9 +4,7 @@ use crate::activity_list::list_athlete_activities;
 use crate::app_state::AppState;
 use crate::index::show_index;
 use crate::strava_api::strava_routes::{
-    redirect_to_strava_login_page,
-    handle_login_authorized,
-    logout
+    handle_login_authorized, logout, redirect_to_strava_login_page,
 };
 
 pub async fn setup_router(app_state: AppState) -> Router {

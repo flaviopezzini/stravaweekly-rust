@@ -1,119 +1,138 @@
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use base64::prelude::*;
+use serde::Serialize;
 
 use crate::{
     app_state::AppState,
+    domain::AuthResponse,
     secret_value::SecretValue,
-    tokens::{MyJwtToken, MyRefreshToken}
+    tokens::{MyAccessToken, MyRefreshToken},
 };
 
-pub async fn set_secure_cookie(
-    cookies: CookieJar,
-    name: String,
-    value: &[u8]) -> Result<CookieJar, anyhow::Error> {
-    let value = String::from_utf8(value.into())?;
-
+pub async fn set_secure_cookie(cookies: CookieJar, name: String, value: String) -> CookieJar {
     let cookie = Cookie::build((name, value))
         .http_only(true)
         //.secure(true) TODO put back
         .same_site(SameSite::Strict)
         .build();
 
-    Ok(cookies.add(cookie))
+    cookies.add(cookie)
 }
 
-pub fn get_secure_cookie(cookies: CookieJar, name: &str) -> Option<Vec<u8>> {
-    cookies.iter().for_each(|c|println!("Cookie name:{} value:{}", c.name(), c.value()));
+pub fn get_secure_cookie(cookies: CookieJar, name: &str) -> Option<String> {
+    cookies
+        .iter()
+        .for_each(|c| println!("Cookie name:{} value:{}", c.name(), c.value()));
 
-    if let Some(cookie) = cookies.get(name) {
-        Some(cookie.value().as_bytes().into())
-    } else {
-        None
-    }
+    cookies.get(name).map(|cookie| cookie.value().into())
 }
 
-pub const CSRF_COOKIE: &str = "s890dsjnnasdf89dsfsdau8f90sdfjsdfj";
-pub const JWT_COOKIE: &str = "sfd809sdf809saf809sdfads949sdoskase894jlksjf";
-pub const REFRESH_COOKIE: &str = "d78wgfuoijdwsfjsdfjdslkfjsadlkfn0989sdfhsdf";
+pub fn encode_cookie<T: Serialize>(value: T) -> Result<String, anyhow::Error> {
+    let value = serde_json::to_string(&value)?;
+    Ok(BASE64_STANDARD.encode(value))
+}
 
-pub struct ValidJwtResult {
-    pub jwt: SecretValue,
+pub fn decode_cookie<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, anyhow::Error> {
+    let decoded = BASE64_STANDARD.decode(value.as_bytes())?;
+    Ok(serde_json::from_slice(&decoded).unwrap())
+}
+
+pub async fn set_auth_cookies(
+    cookies: CookieJar,
+    auth_response: AuthResponse,
+) -> Result<CookieJar, anyhow::Error> {
+    let access_token = MyAccessToken::new(auth_response.access_token, auth_response.expires_at);
+    let access_token = encode_cookie(access_token)?;
+    let with_access_token =
+        set_secure_cookie(cookies, MyAccessToken::cookie_name().into(), access_token).await;
+
+    let my_refresh_token = MyRefreshToken::new(auth_response.refresh_token);
+    let refresh_token_value = encode_cookie(my_refresh_token)?;
+    let with_refresh_token = set_secure_cookie(
+        with_access_token,
+        MyRefreshToken::cookie_name().into(),
+        refresh_token_value,
+    )
+    .await;
+
+    Ok(with_refresh_token)
+}
+
+pub struct FetchAccessTokenResult {
+    pub access_token: SecretValue,
     pub cookies: CookieJar,
 }
 
-pub async fn get_valid_jwt_token(app_state: AppState, cookies: CookieJar) -> Option<ValidJwtResult> {
-    let jwt_cookie = get_secure_cookie(
-        cookies.clone(),
-        JWT_COOKIE
-    );
-    if let Some(jwt_cookie_bytes) = jwt_cookie {
-        match MyJwtToken::from_bytes(&jwt_cookie_bytes) {
-            Ok(jwt_cookie) => {
-                if jwt_cookie.is_valid() {
-                    return Some(
-                        ValidJwtResult {
-                            jwt: SecretValue::new(jwt_cookie.value),
-                            cookies: cookies.clone()
-                        }
-                    )
-                } else {
-                    return None;
-                }
-            },
-            Err(err) => {
-                tracing::debug!("Error converting jwt cookie from bytes to struct {}", err);
-                return None;
-            }
-        }
-    } else {
-        let refresh_cookie = get_secure_cookie(
-            cookies.clone(),
-            REFRESH_COOKIE
-        );
-        if let Some(refresh_cookie_bytes) = refresh_cookie {
-            match MyRefreshToken::from_bytes(&refresh_cookie_bytes) {
-                Ok(refresh_token) => {
-                    if let Ok(new_tokens) = app_state.strava_client
-                            .refresh_tokens(&app_state.app_config, refresh_token).await {
-                        let with_jwt_added = match set_secure_cookie(
-                            cookies.clone(),
-                            JWT_COOKIE.into(),
-                            new_tokens.access_token.as_bytes()
-                        ).await {
-                            Ok(value) => value,
-                            Err(e) => {
-                                tracing::debug!("Error adding JWT cookie: {}", e);
-                                return None;
-                            }
-                        };
-                        let with_refresh_added = match set_secure_cookie(
-                            with_jwt_added,
-                            REFRESH_COOKIE.into(),
-                            new_tokens.refresh_token.as_bytes()
-                        ).await {
-                            Ok(value) => value,
-                            Err(e) => {
-                                tracing::debug!("Error adding Refresh cookie: {}", e);
-                                return None;
-                            }
-                        };
+pub async fn get_valid_access_token(
+    app_state: AppState,
+    cookies: CookieJar,
+) -> Option<FetchAccessTokenResult> {
+    let access_token = fetch_from_access_token(cookies.clone());
 
-                        return Some(
-                            ValidJwtResult {
-                                jwt: SecretValue::new(new_tokens.access_token),
-                                cookies: with_refresh_added
-                            }
-                        );
-                    } else {
-                        return None;
-                    }
-                },
-                Err(err) => {
-                    tracing::debug!("Error converting refresh cookie from bytes to struct {}", err);
-                    return None;
-                }
-            }
-        } else {
-            return None;
+    if let Some(access_token) = access_token {
+        return Some(FetchAccessTokenResult {
+            access_token: SecretValue::new(access_token),
+            cookies,
+        });
+    } else {
+        let refresh_result = fetch_from_refreshing_tokens(app_state, cookies).await;
+        if let Some(refresh_result) = refresh_result {
+            return Some(refresh_result);
         }
     }
+
+    None
+}
+
+fn fetch_from_access_token(cookies: CookieJar) -> Option<String> {
+    let access_cookie = get_secure_cookie(cookies.clone(), MyAccessToken::cookie_name());
+    if let Some(access_cookie) = access_cookie {
+        match decode_cookie::<MyAccessToken>(&access_cookie) {
+            Ok(access_token) => {
+                if access_token.is_valid() {
+                    return Some(access_token.value);
+                }
+            }
+            Err(err) => {
+                tracing::debug!("Error encoding access token from cookie {}", err);
+            }
+        }
+    }
+
+    None
+}
+
+async fn fetch_from_refreshing_tokens(
+    app_state: AppState,
+    cookies: CookieJar,
+) -> Option<FetchAccessTokenResult> {
+    let refresh_cookie = get_secure_cookie(cookies.clone(), MyRefreshToken::cookie_name());
+    if let Some(refresh_cookie) = refresh_cookie {
+        match decode_cookie::<MyRefreshToken>(&refresh_cookie) {
+            Ok(refresh_token) => {
+                if let Ok(auth_response) = app_state
+                    .strava_client
+                    .refresh_tokens(&app_state.app_config, refresh_token)
+                    .await
+                {
+                    match set_auth_cookies(cookies, auth_response.clone()).await {
+                        Ok(updated_cookies) => {
+                            return Some(FetchAccessTokenResult {
+                                access_token: SecretValue::new(auth_response.access_token),
+                                cookies: updated_cookies,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::debug!("Error setting the auth tokens: {}", e);
+                        }
+                    };
+                }
+            }
+            Err(err) => {
+                tracing::debug!("Error decoding refresh token from cookie {}", err);
+            }
+        }
+    }
+
+    None
 }

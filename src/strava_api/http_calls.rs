@@ -1,6 +1,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
 use oauth2::{
-    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenUrl
+    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenUrl,
 };
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -9,7 +9,9 @@ use reqwest::{Client, Url};
 
 use anyhow::Context;
 
-use crate::{app_config::AppConfig, domain::AuthResponse, secret_value::SecretValue, tokens::MyRefreshToken};
+use crate::{
+    app_config::AppConfig, domain::AuthResponse, secret_value::SecretValue, tokens::MyRefreshToken,
+};
 
 #[derive(Clone)]
 pub struct StravaClient {
@@ -21,20 +23,23 @@ const STRAVA_URL: &str = "https://www.strava.com";
 
 impl StravaClient {
     pub fn new(app_config: AppConfig) -> Result<Self, anyhow::Error> {
-        Ok(
-            Self {
-                app_config: app_config.clone(),
-                oauth_client: BasicClient::new(
-                    ClientId::new(app_config.client_id.expose_secret()),
-                    Some(ClientSecret::new(app_config.client_secret.expose_secret())),
-                    AuthUrl::new(app_config.auth_url.clone()).context("failed to create new authorization server URL")?,
-                    Some(TokenUrl::new(app_config.token_url.clone()).context("failed to create new token endpoint URL")?),
-                )
-                .set_redirect_uri(
-                    RedirectUrl::new(app_config.redirect_url.clone()).context("failed to create new redirection URL")?,
-                )
-            }
-        )
+        Ok(Self {
+            app_config: app_config.clone(),
+            oauth_client: BasicClient::new(
+                ClientId::new(app_config.client_id.expose_secret()),
+                Some(ClientSecret::new(app_config.client_secret.expose_secret())),
+                AuthUrl::new(app_config.auth_url.clone())
+                    .context("failed to create new authorization server URL")?,
+                Some(
+                    TokenUrl::new(app_config.token_url.clone())
+                        .context("failed to create new token endpoint URL")?,
+                ),
+            )
+            .set_redirect_uri(
+                RedirectUrl::new(app_config.redirect_url.clone())
+                    .context("failed to create new redirection URL")?,
+            ),
+        })
     }
 
     pub fn get_auth_url(&self) -> (Url, CsrfToken) {
@@ -46,17 +51,17 @@ impl StravaClient {
         (auth_url, csrf_state)
     }
 
-    pub async fn fetch_token(
-        &self,
-        code: String,
-    ) -> Result<AuthResponse, anyhow::Error> {
+    pub async fn fetch_token(&self, code: String) -> Result<AuthResponse, anyhow::Error> {
         let client = Client::new();
 
         let token_response = client
             .post(format!("{}/oauth/token", STRAVA_URL))
             .form(&[
                 ("client_id", &self.app_config.client_id.expose_secret()),
-                ("client_secret", &self.app_config.client_secret.expose_secret()),
+                (
+                    "client_secret",
+                    &self.app_config.client_secret.expose_secret(),
+                ),
                 ("code", &code),
                 ("grant_type", &"authorization_code".to_string()),
             ])
@@ -99,17 +104,19 @@ impl StravaClient {
         jwt_token: SecretValue,
         user_timezone_offset_in_hours: i32,
         start_date_time: NaiveDateTime,
-        end_date_time: NaiveDateTime
+        end_date_time: NaiveDateTime,
     ) -> Result<String, anyhow::Error> {
         let client = Client::new();
 
         let user_zone_offset = FixedOffset::east_opt(user_timezone_offset_in_hours * 3600).unwrap();
 
         // Convert start_date and end_date to DateTime with the user's timezone
-        let zoned_start: DateTime<FixedOffset> =
-            user_zone_offset.from_local_datetime(&start_date_time).unwrap();
-        let zoned_end: DateTime<FixedOffset> =
-            user_zone_offset.from_local_datetime(&end_date_time).unwrap();
+        let zoned_start: DateTime<FixedOffset> = user_zone_offset
+            .from_local_datetime(&start_date_time)
+            .unwrap();
+        let zoned_end: DateTime<FixedOffset> = user_zone_offset
+            .from_local_datetime(&end_date_time)
+            .unwrap();
 
         // Convert the DateTime to Unix timestamps (seconds since epoch)
         let before = zoned_end.timestamp(); // End time
@@ -118,13 +125,14 @@ impl StravaClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", jwt_token.expose_secret()))?
+            HeaderValue::from_str(&format!("Bearer {}", jwt_token.expose_secret()))?,
         );
 
         let token_response = client
-            .get(
-                format!("{}/api/v3/athlete/activities?before={}&after={}", STRAVA_URL, before, after)
-            )
+            .get(format!(
+                "{}/api/v3/athlete/activities?before={}&after={}",
+                STRAVA_URL, before, after
+            ))
             .headers(headers)
             .send()
             .await

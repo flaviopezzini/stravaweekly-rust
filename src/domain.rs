@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AuthResponse {
     pub access_token: String,
     pub refresh_token: String,

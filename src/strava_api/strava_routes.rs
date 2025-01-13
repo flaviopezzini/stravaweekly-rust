@@ -1,14 +1,17 @@
-use axum::{extract::{Query, State}, response::{IntoResponse, Redirect}};
+use axum::{
+    extract::{Query, State},
+    response::{IntoResponse, Redirect},
+};
 use axum_extra::extract::{cookie::Cookie, CookieJar};
 use oauth2::CsrfToken;
 use serde::Deserialize;
 
 use crate::{
     app_state::AppState,
-    cookie_manager::{get_secure_cookie, set_secure_cookie, CSRF_COOKIE, JWT_COOKIE, REFRESH_COOKIE},
-    tokens::{
-        MyCsrfToken, MyJwtToken, MyRefreshToken
-    }
+    cookie_manager::{
+        decode_cookie, encode_cookie, get_secure_cookie, set_auth_cookies, set_secure_cookie,
+    },
+    tokens::{MyAccessToken, MyCsrfToken, MyRefreshToken},
 };
 
 #[axum::debug_handler]
@@ -20,36 +23,24 @@ pub async fn redirect_to_strava_login_page(
 
     let csrf_state = MyCsrfToken(csrf_state);
 
-    let cookie_value = match csrf_state.to_bytes() {
+    let cookie_value = match encode_cookie(csrf_state) {
         Ok(value) => value,
         Err(err) => {
             tracing::debug!("Error encoding the csrf token: {}", err);
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    let cookies = match set_secure_cookie(
-        cookies,
-        CSRF_COOKIE.into(),
-        &cookie_value
-    ).await {
-        Ok(val) => val,
-        Err(err) => {
-            tracing::debug!("Error writing the csrf token: {}", err);
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    };
+    let cookies = set_secure_cookie(cookies, MyCsrfToken::cookie_name().into(), cookie_value).await;
 
     (cookies, Redirect::to(auth_url.as_ref())).into_response()
 }
 
 #[axum::debug_handler]
-pub async fn logout(
-    cookies: CookieJar,
-) -> impl IntoResponse {
-    let updated_cookies = cookies.remove(Cookie::from(CSRF_COOKIE));
-    let updated_cookies = updated_cookies.remove(Cookie::from(JWT_COOKIE));
-    let updated_cookies = updated_cookies.remove(Cookie::from(REFRESH_COOKIE));
+pub async fn logout(cookies: CookieJar) -> impl IntoResponse {
+    let updated_cookies = cookies.remove(Cookie::from(MyCsrfToken::cookie_name()));
+    let updated_cookies = updated_cookies.remove(Cookie::from(MyAccessToken::cookie_name()));
+    let updated_cookies = updated_cookies.remove(Cookie::from(MyRefreshToken::cookie_name()));
 
     (updated_cookies, Redirect::to("/"))
 }
@@ -68,13 +59,10 @@ pub async fn handle_login_authorized(
 ) -> impl IntoResponse {
     let request_csrf_state = CsrfToken::new(query.state);
 
-    let csrf_cookie = get_secure_cookie(
-        cookies.clone(),
-        CSRF_COOKIE
-    );
+    let csrf_cookie = get_secure_cookie(cookies.clone(), MyCsrfToken::cookie_name());
 
-    let csrf_token_cookie = if let Some(cookie_bytes) = csrf_cookie {
-        match MyCsrfToken::from_bytes(&cookie_bytes) {
+    let csrf_token_cookie = if let Some(csrf_cookie) = csrf_cookie {
+        match decode_cookie::<MyCsrfToken>(&csrf_cookie) {
             Ok(val) => val,
             Err(e) => {
                 tracing::debug!("Error decoding the csrf token: {}", e);
@@ -91,52 +79,22 @@ pub async fn handle_login_authorized(
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    let auth_tokens = match app_state.strava_client
+    let auth_response = match app_state
+        .strava_client
         .fetch_token(query.code.clone())
-        .await {
-            Ok(val) => val,
-            Err(e) => {
-                tracing::debug!("Error fetching the token: {}", e);
-                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-    };
-
-    let my_jwt_token = MyJwtToken::new(auth_tokens.access_token, auth_tokens.expires_at);
-    let jwt_token_value = match my_jwt_token.to_bytes() {
+        .await
+    {
         Ok(val) => val,
         Err(e) => {
-            tracing::debug!("Error enconding the JWT token: {}", e);
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let updated_cookies = match set_secure_cookie(
-        cookies,
-        JWT_COOKIE.into(),
-        &jwt_token_value,
-    ).await {
-        Ok(val) => val,
-        Err(e) => {
-            tracing::debug!("Error storing JWT cookie: {}", e);
+            tracing::debug!("Error fetching the token: {}", e);
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    let my_refresh_token = MyRefreshToken::new(auth_tokens.refresh_token);
-    let refresh_token_value = match my_refresh_token.to_bytes() {
-        Ok(val) => val,
+    let updated_cookies = match set_auth_cookies(cookies, auth_response).await {
+        Ok(updated_cookies) => updated_cookies,
         Err(e) => {
-            tracing::debug!("Error enconding the Refresh token: {}", e);
-            return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let updated_cookies = match set_secure_cookie(
-        updated_cookies,
-        JWT_COOKIE.into(),
-        &refresh_token_value,
-    ).await {
-        Ok(val) => val,
-        Err(e) => {
-            tracing::debug!("Error storing JWT cookie: {}", e);
+            tracing::debug!("Error setting the auth tokens: {}", e);
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };

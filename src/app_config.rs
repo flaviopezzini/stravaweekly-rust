@@ -19,11 +19,11 @@ impl AppConfig {
         let redirect_url = env::var("REDIRECT_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:3000/auth/authorized".to_owned());
 
-        let auth_url =
-            env::var("AUTH_URL").unwrap_or_else(|_| "http://www.strava.com/oauth/authorize".to_owned());
+        let auth_url = env::var("AUTH_URL")
+            .unwrap_or_else(|_| "http://www.strava.com/oauth/authorize".to_owned());
 
-        let token_url =
-            env::var("TOKEN_URL").unwrap_or_else(|_| "https://www.strava.com/oauth/token".to_owned());
+        let token_url = env::var("TOKEN_URL")
+            .unwrap_or_else(|_| "https://www.strava.com/oauth/token".to_owned());
 
         Self {
             client_id: SecretValue::new(client_id),
@@ -33,5 +33,4 @@ impl AppConfig {
             token_url,
         }
     }
-
 }
