@@ -18,7 +18,11 @@
 
 <body>
 
-  <div class="container unauthenticated">
+  <div class="container loading">
+      Loading...
+  </div>
+
+  <div class="container unauthenticated" style="display: none">
     <h1>Login</h1>
     With Strava: <a href="/auth/strava">click here</a>
   </div>
@@ -42,7 +46,6 @@
     <h2>Weekly for period: From: <span id="startDateDisplay"></span> To <span id="endDateDisplay"></span></h2>
 
     <table id="weeklyGrid" class="table table-bordered">
-      <caption>Weekly Grid</caption>
       <thead>
         <th scope="col" style="text-align: center;">
           Date
@@ -81,8 +84,6 @@
 
   </div>
 
-<script type="text/javascript" src="/webjars/js-cookie/js.cookie.js"></script>
-
 <script type="text/javascript">
 // start this empty so it loads the data the first time
 var sortedActivityListCache = null;
@@ -95,27 +96,9 @@ var MILE = 1609;
 var MILLISECONDS_IN_A_SECOND = 1000;
 var METER_TO_FEET_RATIO = 3.28084;
 
-$.ajaxSetup({
-  beforeSend: function(xhr, settings) {
-
-    if (settings.type == 'GET' ||
-        settings.type == 'POST' ||
-        settings.type == 'PUT' ||
-        settings.type == 'DELETE') {
-
-      if (!(/^http:.*/.test(settings.url) ||
-          /^https:.*/.test(settings.url))) {
-
-        // Only send the token to relative URLs i.e. locally.
-        xhr.setRequestHeader("X-XSRF-TOKEN", Cookies.get('XSRF-TOKEN'));
-      }
-    }
-  }
-});
-
 var logout = function() {
 
-  $.post("/logout", function() {
+  $.get("/logout", function() {
     document.querySelector(".unauthenticated").style.display = "block";
     document.querySelector(".authenticated").style.display = "none";
   });
@@ -246,7 +229,7 @@ var populateTable = function(sortedActivityList) {
     document.querySelector("#totalStatute").textContent = totalStatute.toFixed(2) + " mi";
     document.querySelector("#totalMetric").textContent = totalMetric.toFixed(2) + " km";
 
-    document.querySelector(".unauthenticated").style.display = "none";
+    document.querySelector(".loading").style.display = "none";
     document.querySelector(".authenticated").style.display = "block";
 }
 
@@ -257,13 +240,18 @@ var listActivities = function() {
   } else {
     var userTimezoneOffsetInHours = parseInt(luxon.DateTime.local().offset / 60);
     var listAthleteActivitiesUrl = "/athlete/activities" +
-      "?userTimezoneOffsetInHours=" + userTimezoneOffsetInHours +
-      "&startDate=" + formatDateParameterToISOFormat(startDate) + "00:00:00.000" +
-      "&endDate=" + formatDateParameterToISOFormat(endDate) + "23:59:59.999";
+      "?user_timezone_offset_in_hours=" + userTimezoneOffsetInHours +
+      "&start_date=" + formatDateParameterToISOFormat(startDate) + "00:00:00.000" +
+      "&end_date=" + formatDateParameterToISOFormat(endDate) + "23:59:59.999";
 
-    $.get(listAthleteActivitiesUrl, function(activityList) {
+    $.get(listAthleteActivitiesUrl, function(activityList_str) {
+      var activityList = JSON.parse(activityList_str);
       sortedActivityListCache = activityList.sort((a, b) => getDateForSort(a.start_date_local) - getDateForSort(b.start_date_local));
       populateTable(sortedActivityListCache);
+    })
+    .fail(function() {
+      document.querySelector(".loading").style.display = "none";
+      document.querySelector(".unauthenticated").style.display = "block";
     });
   }
 }
@@ -333,6 +321,11 @@ var populatePeriod = function(startDate, endDate) {
 
 
 ready(() => {
+  endDate = getEndDate();
+  startDate = getStartDate(endDate);
+
+  populatePeriod(startDate, endDate);
+  listActivities();
 });
 </script>
 

@@ -9,21 +9,24 @@ use crate::{
     tokens::{MyAccessToken, MyRefreshToken},
 };
 
-pub async fn set_secure_cookie(cookies: CookieJar, name: String, value: String) -> CookieJar {
+pub async fn set_lax_cookie(cookies: CookieJar, name: String, value: String) -> CookieJar {
+    set_cookie(cookies, name, value, SameSite::Lax).await
+}
+pub async fn set_strict_cookie(cookies: CookieJar, name: String, value: String) -> CookieJar {
+    set_cookie(cookies, name, value, SameSite::Strict).await
+}
+async fn set_cookie(cookies: CookieJar, name: String, value: String, same_site: SameSite) -> CookieJar {
     let cookie = Cookie::build((name, value))
         .http_only(true)
         //.secure(true) TODO put back
-        .same_site(SameSite::Strict)
+        .same_site(same_site)
+        .path("/")
         .build();
 
     cookies.add(cookie)
 }
 
 pub fn get_secure_cookie(cookies: CookieJar, name: &str) -> Option<String> {
-    cookies
-        .iter()
-        .for_each(|c| println!("Cookie name:{} value:{}", c.name(), c.value()));
-
     cookies.get(name).map(|cookie| cookie.value().into())
 }
 
@@ -44,11 +47,11 @@ pub async fn set_auth_cookies(
     let access_token = MyAccessToken::new(auth_response.access_token, auth_response.expires_at);
     let access_token = encode_cookie(access_token)?;
     let with_access_token =
-        set_secure_cookie(cookies, MyAccessToken::cookie_name().into(), access_token).await;
+        set_strict_cookie(cookies, MyAccessToken::cookie_name().into(), access_token).await;
 
     let my_refresh_token = MyRefreshToken::new(auth_response.refresh_token);
     let refresh_token_value = encode_cookie(my_refresh_token)?;
-    let with_refresh_token = set_secure_cookie(
+    let with_refresh_token = set_strict_cookie(
         with_access_token,
         MyRefreshToken::cookie_name().into(),
         refresh_token_value,

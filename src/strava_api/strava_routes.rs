@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::{
     app_state::AppState,
     cookie_manager::{
-        decode_cookie, encode_cookie, get_secure_cookie, set_auth_cookies, set_secure_cookie,
+        decode_cookie, encode_cookie, get_secure_cookie, set_auth_cookies, set_lax_cookie,
     },
     tokens::{MyAccessToken, MyCsrfToken, MyRefreshToken},
 };
@@ -31,7 +31,7 @@ pub async fn redirect_to_strava_login_page(
         }
     };
 
-    let cookies = set_secure_cookie(cookies, MyCsrfToken::cookie_name().into(), cookie_value).await;
+    let cookies = set_lax_cookie(cookies, MyCsrfToken::cookie_name().into(), cookie_value).await;
 
     (cookies, Redirect::to(auth_url.as_ref())).into_response()
 }

@@ -136,11 +136,8 @@ impl StravaClient {
             .headers(headers)
             .send()
             .await
-            .context("Failed to send list activity request")?
-            .json::<String>()
-            .await
-            .context("Failed to parse list activity response")?;
+            .context("Failed to send list activity request")?;
 
-        Ok(token_response)
+        Ok(token_response.text().await?)
     }
 }

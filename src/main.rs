@@ -19,6 +19,8 @@ mod tokens;
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    dotenvy::dotenv().ok();
+
     let app_config = AppConfig::new();
 
     let strava_client =
