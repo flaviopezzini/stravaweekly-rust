@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+.gitignore
+Dockerfile
+fly.toml
+*.md
+.env
+.env.*
+debug/
+**/*.rs.bk
+*.pdb

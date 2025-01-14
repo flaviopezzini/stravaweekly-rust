@@ -28,7 +28,9 @@ impl StravaClient {
     pub fn get_auth_url(&self, redirect_uri: String) -> (Url, MyCsrfToken) {
         let csrf_token = MyCsrfToken::new_random();
 
-        let mut url = Url::parse("https://www.strava.com/oauth/authorize").unwrap();
+        let mut url = Url::parse(
+            format!("{}/oauth/authorize", STRAVA_URL).as_str()
+        ).unwrap();
         url.query_pairs_mut()
             .append_pair("client_id", &self.app_config.client_id.expose_secret())
             .append_pair("redirect_uri", &redirect_uri)
