@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
     response::{IntoResponse, Redirect},
 };
-use axum_extra::extract::{cookie::Cookie, CookieJar};
+use axum_extra::extract::{cookie::Cookie, CookieJar, Host};
 use serde::Deserialize;
 
 use crate::{
@@ -17,8 +17,26 @@ use crate::{
 pub async fn redirect_to_strava_login_page(
     State(app_state): State<AppState>,
     cookies: CookieJar,
+    Host(host): Host,
+    req: Request<axum::body::Body>,
 ) -> impl IntoResponse {
-    let (auth_url, csrf_state) = app_state.strava_client.get_auth_url();
+    let path = "/auth/authorized";
+    let port = req
+        .uri()
+        .port_u16();
+
+    let scheme = req
+        .uri()
+        .scheme_str()
+        .unwrap_or("https");
+
+    let redirect_uri = if let Some(port) = port {
+        format!("{}://{}:{}{}", scheme, host, port, path)
+    } else {
+        format!("{}://{}{}", scheme, host, path)
+    };
+
+    let (auth_url, csrf_state) = app_state.strava_client.get_auth_url(redirect_uri);
 
     let cookie_value = match encode_cookie(csrf_state) {
         Ok(value) => value,
