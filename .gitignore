@@ -1,3 +1,5 @@
 .vscode/
 /target
 export_vars.sh
+.env
+.github/
