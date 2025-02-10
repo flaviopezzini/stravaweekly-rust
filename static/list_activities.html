@@ -236,10 +236,8 @@ var populateTable = function(sortedActivityList) {
 var listActivities = function() {
 
   if (sortedActivityListCache) {
-    console.log("List was in the local cache");
     populateTable(sortedActivityListCache);
   } else {
-    console.log("List was not in the local cache, fetching from Strava");
     var userTimezoneOffsetInHours = parseInt(luxon.DateTime.local().offset / 60);
     var listAthleteActivitiesUrl = "/athlete/activities" +
       "?user_timezone_offset_in_hours=" + userTimezoneOffsetInHours +
@@ -247,12 +245,13 @@ var listActivities = function() {
       "&end_date=" + formatDateParameterToISOFormat(endDate) + "23:59:59.999";
 
     $.get(listAthleteActivitiesUrl, function(activityList_str) {
-      console.log("Got list in String format");
       var activityList = JSON.parse(activityList_str);
-      console.log("Converted list to JSON");
-      sortedActivityListCache = activityList.sort((a, b) => getDateForSort(a.start_date_local) - getDateForSort(b.start_date_local));
-      console.log("Sorted list");
-      populateTable(sortedActivityListCache);
+      if (Array.isArray(activityList)) {
+        sortedActivityListCache = activityList.sort((a, b) => getDateForSort(a.start_date_local) - getDateForSort(b.start_date_local));
+        populateTable(sortedActivityListCache);
+      } else {
+        console.log("Not array, likely token expired: " + activityList_str);
+      }
     })
     .fail(function() {
       document.querySelector(".loading").style.display = "none";
@@ -327,14 +326,10 @@ var populatePeriod = function(startDate, endDate) {
 
 ready(() => {
   endDate = getEndDate();
-  console.log("Computed End Date: " + endDate);
   startDate = getStartDate(endDate);
-  console.log("Computed Start Date: " + startDate);
 
   populatePeriod(startDate, endDate);
-  console.log("Populated period");
   listActivities();
-  console.log("Listed activities");
 });
 </script>
 
