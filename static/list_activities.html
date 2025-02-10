@@ -250,14 +250,19 @@ var listActivities = function() {
         sortedActivityListCache = activityList.sort((a, b) => getDateForSort(a.start_date_local) - getDateForSort(b.start_date_local));
         populateTable(sortedActivityListCache);
       } else {
+        showUnauthenticated();
         console.log("Not array, likely token expired: " + activityList_str);
       }
     })
     .fail(function() {
-      document.querySelector(".loading").style.display = "none";
-      document.querySelector(".unauthenticated").style.display = "block";
+      showUnauthenticated();
     });
   }
+}
+
+var showUnauthenticated = function() {
+  document.querySelector(".loading").style.display = "none";
+  document.querySelector(".unauthenticated").style.display = "block";
 }
 
 var getEndDate = function() {
